@@ -1,34 +1,73 @@
-//SPDX-License-Identifier: MIT
-pragma solidity ^0.8.17;
-
-import './lib/Tick.sol';
-import './lib/Position.sol';
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.14;
 
 import "./interfaces/IERC20.sol";
 import "./interfaces/IUniswapV3MintCallback.sol";
 import "./interfaces/IUniswapV3SwapCallback.sol";
 
-contract UniswapV3Poll {
+import "./lib/Position.sol";
+import "./lib/Tick.sol";
+
+contract UniswapV3Pool {
     using Tick for mapping(int24 => Tick.Info);
     using Position for mapping(bytes32 => Position.Info);
     using Position for Position.Info;
+    mapping(int24 => uint256) public tickBitmap;
+    using tickBitmap for mapping(int24 => uint256);
+
+    error InsufficientInputAmount();
+    error InvalidTickRange();
+    error ZeroLiquidity();
+
+    event Mint(
+        address sender,
+        address indexed owner,
+        int24 indexed tickLower,
+        int24 indexed tickUpper,
+        uint128 amount,
+        uint256 amount0,
+        uint256 amount1
+    );
+
+    event Swap(
+        address indexed sender,
+        address indexed recipient,
+        int256 amount0,
+        int256 amount1,
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        int24 tick
+    );
 
     int24 internal constant MIN_TICK = -887272;
     int24 internal constant MAX_TICK = -MIN_TICK;
 
+    // Pool tokens, immutable
     address public immutable token0;
     address public immutable token1;
 
+    // First slot will contain essential data
     struct Slot0 {
-        uint sqrtPriceX96;
+        // Current sqrt(P)
+        uint160 sqrtPriceX96;
+        // Current tick
         int24 tick;
+    }
+
+    struct CallbackData {
+        address token0;
+        address token1;
+        address payer;
     }
 
     Slot0 public slot0;
 
-    uint public liquidity;
+    // Amount of liquidity, L.
+    uint128 public liquidity;
 
+    // Ticks info
     mapping(int24 => Tick.Info) public ticks;
+    // Positions info
     mapping(bytes32 => Position.Info) public positions;
 
     constructor(
@@ -39,33 +78,35 @@ contract UniswapV3Poll {
     ) {
         token0 = token0_;
         token1 = token1_;
+
         slot0 = Slot0({sqrtPriceX96: sqrtPriceX96, tick: tick});
     }
 
     function mint(
-        address owner, 
+        address owner,
         int24 lowerTick,
         int24 upperTick,
-        uint128 amount
-    ) external pure returns(uint256 amount0, uint256 amount1) {
-        uint256 balance0Before;
-        uint256 balance1Before;
-
-        if(lowerTick >= upperTick ||
-        lowerTick < MIN_TICK ||
-        upperTick > MAX_TICK
+        uint128 amount,
+        bytes calldata data
+    ) external returns (uint256 amount0, uint256 amount1) {
+        if (
+            lowerTick >= upperTick ||
+            lowerTick < MIN_TICK ||
+            upperTick > MAX_TICK
         ) revert InvalidTickRange();
-        if(amount == 0) revert ZeroLiquidity(); 
-        if(amount0 > 0) balance0Before = balance0();
-        if(amount1 > 0) balance1Before = balance1();
 
-        IUniswapV3MintCallback(msg.sender).UniswapV3MintCallback(
-            amount0,
-            amount1
-        );
+        bool flippedLower = ticks.update(lowerTick, amount);
+        bool flippedUpper = ticks.update(upperTick, amount);
 
-        if(amount0 > 0 && balance0Before + amount0 > balance0()) revert InsufficientInputAmount();
-        if(amount0 > 1 && balance0Before + amount1 > balance1()) revert InsufficientInputAmount();
+        if (flippedLower) {
+            tickBitmap.flipTick(lowerTick, 1);
+        }
+
+        if (flippedUpper) {
+            tickBitmap.flipTick(upperTick, 1);
+        }
+
+        if (amount == 0) revert ZeroLiquidity();
 
         ticks.update(lowerTick, amount);
         ticks.update(upperTick, amount);
@@ -75,18 +116,122 @@ contract UniswapV3Poll {
             lowerTick,
             upperTick
         );
-        position.update(amount);    
-        
-        emit Mint(msg.sender, owner, lowerTick, upperTick, amount, amount0, amount1);
+        position.update(amount);
+
+        amount0 = 0.998976618347425280 ether; // TODO: replace with calculation
+        amount1 = 5000 ether; // TODO: replace with calculation
+
+        liquidity += uint128(amount);
+
+        uint256 balance0Before;
+        uint256 balance1Before;
+        if (amount0 > 0) balance0Before = balance0();
+        if (amount1 > 0) balance1Before = balance1();
+        IUniswapV3MintCallback(msg.sender).uniswapV3MintCallback(
+            amount0,
+            amount1,
+            data
+        );
+        if (amount0 > 0 && balance0Before + amount0 > balance0())
+            revert InsufficientInputAmount();
+        if (amount1 > 0 && balance1Before + amount1 > balance1())
+            revert InsufficientInputAmount();
+
+        emit Mint(
+            msg.sender,
+            owner,
+            lowerTick,
+            upperTick,
+            amount,
+            amount0,
+            amount1
+        );
     }
 
-    function balance0() internal returns(uint256 balance) {
+    function swap(address recipient, bytes calldata data)
+        public
+        returns (int256 amount0, int256 amount1)
+    {
+        int24 nextTick = 85184;
+        uint160 nextPrice = 5604469350942327889444743441197;
+
+        amount0 = -0.008396714242162444 ether;
+        amount1 = 42 ether;
+
+        (slot0.tick, slot0.sqrtPriceX96) = (nextTick, nextPrice);
+
+        IERC20(token0).transfer(recipient, uint256(-amount0));
+
+        uint256 balance1Before = balance1();
+        IUniswapV3SwapCallback(msg.sender).uniswapV3SwapCallback(
+            amount0,
+            amount1,
+            data
+        );
+        if (balance1Before + uint256(amount1) > balance1())
+            revert InsufficientInputAmount();
+
+        emit Swap(
+            msg.sender,
+            recipient,
+            amount0,
+            amount1,
+            slot0.sqrtPriceX96,
+            liquidity,
+            slot0.tick
+        );
+    }
+
+    function balance0() internal returns (uint256 balance) {
         balance = IERC20(token0).balanceOf(address(this));
     }
 
-    function balance1() internal returns(uint256 balance) {
+    function balance1() internal returns (uint256 balance) {
         balance = IERC20(token1).balanceOf(address(this));
     }
 
+    function position(int24 tick)private pure returns(int16 wordPos, uint8 bitPos) {
+        wordPos = int16(tick >> 8);
+        bitPos = uint8(uint24(tick % 256));
+    }
 
+    function flipTick(
+        mapping(int16 => uint256) storage self,
+        int24 tick,
+        int24 tickSpacing
+    ) internal {
+        require(tick % tickSpacing == 0);
+        (int16 wordPos, uint8 bitPos) = position(tick / tickSpacing);
+        uint256 mask = 1 << bitPos;
+        self[wordPos] ^= mask;
+    }
+
+    function nextInitializedTickWithihOneWord(
+        mapping(int16 => uint256) storage self,
+        int24 tick,
+        int24 tickSpacing,
+        bool lte
+    ) internal view returns(int24 next, bool initialized) {
+        int24 compressed = tick / tickSpacing;
+
+        if(lte) {
+            (int24 wordPos, uint8 bitPos) = position(compressed);
+            uint256 mask = (1 << bitPos) - 1 + (1 << bitPos);
+            uint256 masked = self[wordPos] & mask;
+
+            initialized = masked != 0;
+            next = initialized 
+            ? (compressed - int24(uint24(bitPos - BitMath.mostSignificantBit(masked)))) * tickSpacing
+            : (compressed - int24(uint24(bitPos))) * tickSpacing;
+        } else {
+            (int16 wordPos, uint8 bitPos) = position(compressed + 1);
+            uint256 mask = ~((1 << bitPos) - 1);
+            uint256 masked = self[wordPos] & mask;
+
+            initialized = masked != 0;
+            next = initialized
+            ? (compressed + 1 + int24(uint24((BitMath.leastSignificantBit(masked) - bitPos)))) * tickSpacing
+            : (compressed + 1 + int24(uint24((type(uint8).max - bitPos)))) * tickSpacing;
+        }
+    }
 }

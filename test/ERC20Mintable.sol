@@ -14,3 +14,4 @@ contract ERC20Mintable is ERC20 {
         _mint(to, amount);
     }
 }
+
