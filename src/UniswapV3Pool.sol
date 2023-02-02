@@ -42,15 +42,11 @@ contract UniswapV3Pool {
     int24 internal constant MIN_TICK = -887272;
     int24 internal constant MAX_TICK = -MIN_TICK;
 
-    // Pool tokens, immutable
     address public immutable token0;
     address public immutable token1;
 
-    // First slot will contain essential data
     struct Slot0 {
-        // Current sqrt(P)
         uint160 sqrtPriceX96;
-        // Current tick
         int24 tick;
     }
 
@@ -61,13 +57,9 @@ contract UniswapV3Pool {
     }
 
     Slot0 public slot0;
-
-    // Amount of liquidity, L.
     uint128 public liquidity;
 
-    // Ticks info
     mapping(int24 => Tick.Info) public ticks;
-    // Positions info
     mapping(bytes32 => Position.Info) public positions;
 
     constructor(
@@ -118,8 +110,8 @@ contract UniswapV3Pool {
         );
         position.update(amount);
 
-        amount0 = 0.998976618347425280 ether; // TODO: replace with calculation
-        amount1 = 5000 ether; // TODO: replace with calculation
+        amount0 = 0.998976618347425280 ether; 
+        amount1 = 5000 ether; 
 
         liquidity += uint128(amount);
 
